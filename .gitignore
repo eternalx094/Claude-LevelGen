@@ -1,0 +1,9 @@
+# copies of your Geometry Dash save - personal data, never commit
+backups/
+*.dat
+*.tmp
+
+# generated
+previews/
+__pycache__/
+*.pyc
