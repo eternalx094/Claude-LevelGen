@@ -124,12 +124,17 @@ def cmd_install(args) -> None:
                      f"its layout (stats are kept), or rename the level.")
         save.set_level_string(level.name, level.level_string())
         new = level.to_entry(binary_version=save.binary_version)
-        for key in ("k3", "k8", "k45"):
-            value = entry_get(new, key)
-            if value is None:
-                entry_del(existing, key)
-            else:
-                entry_set(existing, key, "s" if key == "k3" else "i", value)
+        # the description follows the script; the song does not - whatever you picked in
+        # game (Jukebox, a NONG, an official track) is yours and survives a rebuild
+        value = entry_get(new, "k3")
+        if value is None:
+            entry_del(existing, "k3")
+        else:
+            entry_set(existing, "k3", "s", value)
+        if entry_get(existing, "k45") is None and entry_get(existing, "k8") is None:
+            for key in ("k8", "k45"):
+                if entry_get(new, key) is not None:
+                    entry_set(existing, key, "i", entry_get(new, key))
         action = "updated"
     else:
         save.add(level.to_entry(binary_version=save.binary_version))

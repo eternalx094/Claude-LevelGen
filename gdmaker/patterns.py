@@ -45,6 +45,24 @@ def zigzag(x0: float, period: float, low: float, high: float, phase: float = 0.0
     return path
 
 
+def wave_zigzag(x0: float, period: float, centre: float, amplitude: float,
+                rows_per_col: float = 1.0, phase: float = 0.0, passage: float | None = None
+                ) -> tuple[Path, float, float]:
+    """A zigzag a wave can actually fly. Returns (path, amplitude, slope in rows/column).
+
+    Two limits apply. The wave climbs one row per column (mini: two), so the corridor cannot
+    out-climb the player. And because corridors are built as one-column slabs, a sloping
+    corridor is a staircase: at the seam between columns the real opening is gap - slope, so
+    a tight corridor has to be shallow or it closes completely. Pass the passage you want to
+    end up with and the slope is capped to keep it open.
+    """
+    limit = period / 2 * rows_per_col * 0.9
+    if passage is not None:
+        limit = min(limit, period / 2 * passage * 0.8)
+    amp = min(amplitude, limit)
+    return zigzag(x0, period, centre - amp / 2, centre + amp / 2, phase), amp, 2 * amp / period
+
+
 def sine(x0: float, period: float, low: float, high: float, phase: float = 0.0) -> Path:
     mid, amp = (low + high) / 2, (high - low) / 2
 
@@ -65,7 +83,8 @@ SEAL_TOP = 14.0    # corridors are sealed to here, so nothing can be flown aroun
 def corridor(lvl: Level, x0: float, x1: float, path: Path, gap: float, *, step: float = 1.0,
              wall: int = 2, spikes: bool = True, floor: bool = True, ceiling: bool = True,
              color: int | None = None, groups: Iterable[int] | None = None,
-             clamp_low: float | None = 0.0, seal: bool = True) -> list[GDObject]:
+             clamp_low: float | None = 0.0, seal: bool = True,
+             fill_color: int | None = None) -> list[GDObject]:
     """Line a path with spike-tipped walls above and below, `gap` blocks apart.
 
     `wall` is how many blocks of filler sit behind each spike row (the visual mass).
@@ -80,30 +99,34 @@ def corridor(lvl: Level, x0: float, x1: float, path: Path, gap: float, *, step: 
         low = centre - gap / 2      # where the floor spikes' tips reach
         high = centre + gap / 2     # where the ceiling spikes' tips reach
         # walls sit at the exact fractional height, so `gap` is the real passage
+        # with spikes on, the spike occupies the boundary row and filler starts behind it;
+        # with spikes off the filler has to start at the boundary or the wall has a hole
+        first = 1 if spikes else 0
         if floor:
             if spikes and (clamp_low is None or low - 1 >= clamp_low):
                 made.append(lvl.spike(x, low - 1, color=color, groups=groups))
-            for i in range(1, wall + 1):
+            for i in range(first, wall + 1):
                 row = low - 1 - i
                 if clamp_low is None or row >= clamp_low - 0.5:
                     made.append(lvl.block(x, row, color=color, groups=groups))
         if ceiling:
             if spikes:
                 made.append(lvl.spike(x, high, ceiling=True, color=color, groups=groups))
-            for i in range(1, wall + 1):
+            for i in range(first, wall + 1):
                 made.append(lvl.block(x, high + i, color=color, groups=groups))
         if seal:
+            fill = fill_color if fill_color is not None else color
             if floor:
                 bottom = low - 1 - wall          # everything below the built wall
                 if bottom > 0.05:
                     made.append(lvl.add(O.BLOCK, x, bottom / 2 - 0.5, scale=(1, bottom),
-                                        color=color, groups=groups))
+                                        color=fill, groups=groups))
             if ceiling:
                 top = high + 1 + wall            # everything above it
                 if SEAL_TOP - top > 0.05:
                     height = SEAL_TOP - top
                     made.append(lvl.add(O.BLOCK, x, (top + SEAL_TOP) / 2 - 0.5,
-                                        scale=(1, height), color=color, groups=groups))
+                                        scale=(1, height), color=fill, groups=groups))
         x += step
     return made
 
@@ -119,15 +142,15 @@ def frame_gap(mode: str, speed: str, fps: int = 240, frames: float = 1.0) -> flo
 
 
 def pinch(lvl: Level, x: float, centre: float, mode: str, speed: str, *, fps: int = 240,
-          frames: float = 1.0, width: int = 2, wall: int = 2, color: int | None = None
-          ) -> list[GDObject]:
+          frames: float = 1.0, width: int = 2, wall: int = 2, color: int | None = None,
+          slope: float = 0.0) -> list[GDObject]:
     """A deliberate frame-perfect squeeze `width` columns long, centred on a row.
 
     Built from blocks, not spikes: a spike's hitbox is ~0.6 of its cell, so spike-lined
     walls leave ~0.4 blocks more passage than the tip-to-tip gap suggests - fine for normal
     corridors, useless when the whole window is 0.43 blocks wide.
     """
-    gap = frame_gap(mode, speed, fps, frames)
+    gap = frame_gap(mode, speed, fps, frames) + slope   # slope is lost at the seams
     return corridor(lvl, x, x + width - 1, lambda _x: centre, gap, wall=wall, spikes=False,
                     color=color)
 

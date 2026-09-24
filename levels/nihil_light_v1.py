@@ -55,7 +55,14 @@ SECTIONS = {
 SPEEDS = {19: "3x", 90: "4x", 115: "1x", 122: "3x", 138: "4x", 165: "3x", 196: "4x",
           227: "3x", 292: "2x"}
 
-CH_WALL, CH_HAZARD, CH_HINT = 1, 2, 3
+CH_EDGE, CH_FILL, CH_HAZARD, CH_HINT = 1, 2, 3, 4
+CH_WALL = CH_EDGE      # corridor edges read bright; the mass behind them stays dark
+
+# the passage the counter should measure in the brutal sections: one 60Hz frame
+# for a wave at 4x. Pinches inside them are built to one 240Hz frame.
+TIGHT_PASSAGE = 0.67
+# the main sections: hard but readable (~2.5 frames at 60Hz for a wave at 3x)
+MAIN_PASSAGE = 1.0
 
 # Sections hand over along the ground (row ~1) so the next portal can't be missed.
 LEAD, TAIL, HANDOVER_GAP = 10, 14, 2.6
@@ -79,7 +86,7 @@ def beats(t: Timeline, bar0: float, bar1: float, per_bar: int):
 
 
 def pinch_bars(lvl, t: Timeline, path, b0: float, b1: float, mode: str, *, step: float = 1.0,
-               fps: int = 240, frames: float = 1.0, guard: float = 6) -> int:
+               fps: int = 240, frames: float = 1.0, guard: float = 6, slope: float = 0.0) -> int:
     """Put a frame-perfect squeeze on bar lines through a range, sized from the speed that
     applies there, so each one measures `frames` frames at `fps` by construction."""
     made, bar = 0, math.ceil(b0)
@@ -87,7 +94,7 @@ def pinch_bars(lvl, t: Timeline, path, b0: float, b1: float, mode: str, *, step:
         x = round(t.col(t.bar(bar)))
         if t.col(t.bar(b0)) + guard <= x <= t.col(t.bar(b1)) - guard:
             P.pinch(lvl, x, path(x), mode, t.speed_at(t.bar(bar)), fps=fps, frames=frames,
-                    width=2, wall=2, color=CH_HAZARD)
+                    width=2, wall=2, color=CH_HAZARD, slope=slope)
             made += 1
         bar += step
     return made
@@ -99,11 +106,12 @@ def build() -> Level:
         description="Base layout. Memory extreme synced to Nhelv. WIP, by Claude.",
         custom_song=812038,          # the ID you map Nhelv onto in Jukebox
         speed="2x",
-        bg=(6, 6, 8), ground=(10, 10, 12), line=(255, 255, 255), obj=(235, 235, 235),
+        bg=(4, 4, 6), ground=(9, 9, 12), line=(255, 255, 255), obj=(235, 235, 235),
     )
-    lvl.color(CH_WALL, (20, 20, 22))
-    lvl.color(CH_HAZARD, (245, 245, 245))
-    lvl.color(CH_HINT, (110, 110, 115))
+    lvl.color(CH_EDGE, (232, 232, 238))
+    lvl.color(CH_FILL, (18, 18, 23))
+    lvl.color(CH_HAZARD, (255, 255, 255))
+    lvl.color(CH_HINT, (120, 120, 130))
 
     t = Timeline(BPM, OFFSET, speed="2x")
     for bar, speed in SPEEDS.items():
@@ -142,34 +150,46 @@ def section_intro(lvl, t, mem, x0, x1, b0, b1):
 
 
 def section_main_wave(lvl, t, mem, x0, x1, b0, b1):
-    """Wave, 3x. Zigzag corridor, one cycle per two beats, gap 2.6 -> 2.0."""
+    """Wave, 3x. Six different phrase shapes, 1.0 passage (~2.5 frames at 60Hz)."""
     start, end = enter(lvl, x0, "wave"), round(x1) - TAIL
-    path = P.zigzag(start, t.blocks_per_beat(t.bar(b0)) * 2, 1.2, 6.2)
-    for x in range(start, end):
-        gap = 1.7 - 0.5 * (x - start) / max(1, end - start)   # 1.7 -> 1.2 blocks
-        P.corridor(lvl, x, x, path, gap, wall=2, color=CH_WALL)
+    wave_run(lvl, t, start, end, b0, b1, MAIN_PASSAGE)
     handover(lvl, x1)
 
 
 def section_main_ship(lvl, t, mem, x0, x1, b0, b1):
-    """Ship, 3x. Straight-fly with gates alternating high/low on the beat."""
+    """Ship, 3x. Gate rhythm changes every phrase: beats, off-beats, then doubles."""
     start, end = enter(lvl, x0, "ship"), round(x1) - TAIL
-    P.tunnel(lvl, start, end, 0.6, 5.4, wall=2, color=CH_WALL)
-    for i, x in enumerate(beats(t, b0, b1, 4)):
-        if not start + 6 <= x <= end - 6:
-            continue
-        low = 1.0 + (1.8 if i % 2 else 0.0)
-        P.gate(lvl, round(x), low, low + 1.8, top=6, bottom=1, color=CH_WALL)
+    P.tunnel(lvl, start, end, 0.6, 6.0, wall=2, spikes=False, color=CH_EDGE,
+             fill_color=CH_FILL)
+    phrase = 4
+    bar = b0
+    while bar < b1:
+        nxt = min(b1, bar + phrase)
+        shape = int((bar - b0) // phrase) % 3
+        density = (4, 8, 4)[shape]
+        for i, x in enumerate(beats(t, bar, nxt, density)):
+            if not start + 6 <= x <= end - 6:
+                continue
+            if shape == 0:                         # alternating high/low on the beat
+                low = 1.0 + (2.0 if i % 2 else 0.0)
+                P.gate(lvl, round(x), low, low + 1.7, top=5, bottom=1, color=CH_EDGE)
+            elif shape == 1 and i % 2:             # off-beat slams, one side only
+                P.gate(lvl, round(x), 1.0, 3.4, top=5, bottom=1, color=CH_EDGE)
+            elif shape == 2:                       # doubles: two gates a column apart
+                low = 2.4 if i % 2 else 1.0
+                for dx in (0, 2):
+                    P.gate(lvl, round(x) + dx, low, low + 1.6, top=5, bottom=1,
+                           color=CH_EDGE)
+        bar = nxt
     handover(lvl, x1)
 
 
 def section_main_mini(lvl, t, mem, x0, x1, b0, b1):
-    """Mini wave, 3x. Twice the slope, so the corridor is steeper and the gap tighter."""
+    """Mini wave, 3x. Same phrase rotation, offset so it does not repeat the first wave
+    section, and tighter because the mini hitbox is smaller."""
     start, end = enter(lvl, x0, "wave"), round(x1) - TAIL
     lvl.portal("mini", start - 4, 1)
-    path = P.zigzag(start, t.blocks_per_beat(t.bar(b0)), 1.0, 5.0)
-    for x in range(start, end):
-        P.corridor(lvl, x, x, path, 1.15, wall=2, color=CH_WALL)   # mini: smaller hitbox
+    wave_run(lvl, t, start, end, b0, b1, MAIN_PASSAGE * 0.8, rotate=3)
     lvl.portal("normal_size", end + 2, 1)
     handover(lvl, x1)
 
@@ -194,7 +214,8 @@ def section_mid(lvl, t, mem, x0, x1, b0, b1):
     spam_start = round(t.col_at_seconds(109.0))    # 1:49
 
     # lead-in: tight zigzag, no orbs yet
-    path = P.zigzag(start, t.blocks_per_beat(t.bar(b0)) * 2, 1.2, 5.2)
+    path, _, _ = P.wave_zigzag(start, t.blocks_per_beat(t.bar(b0)) * 2, centre=3.2,
+                               amplitude=4.0)
     for x in range(start, lead_end):
         P.corridor(lvl, x, x, path, 1.4, wall=2, color=CH_WALL)
 
@@ -243,12 +264,16 @@ def section_morse(lvl, t, mem, x0, x1, b0, b1):
 
 
 def section_build(lvl, t, mem, x0, x1, b0, b1):
-    """Wave, 3x. Rising and closing: 2.4 -> 1.6 straight into the hit."""
+    """Wave, 3x. Phrase rotation again, tightening phrase by phrase into the hit."""
     start, end = enter(lvl, x0, "wave"), round(x1) - TAIL
-    path = P.zigzag(start, t.blocks_per_beat(t.bar(b0)), 1.2, 5.2)
-    for x in range(start, end):
-        P.corridor(lvl, x, x, path, 1.5 - 0.4 * (x - start) / max(1, end - start), wall=2,
-                   color=CH_WALL)  # 1.5 -> 1.1 into the hit
+    phrase, bar, x, i = 4, b0, start, 1
+    while x < end - 4 and bar < b1:
+        nxt_bar = min(b1, bar + phrase)
+        nxt_x = min(end, round(t.col(t.bar(nxt_bar))))
+        squeeze = MAIN_PASSAGE * (0.95 - 0.25 * (bar - b0) / max(1, b1 - b0))
+        if nxt_x - x > 6:
+            WAVE_PATTERNS[i % len(WAVE_PATTERNS)](lvl, t, x, nxt_x, bar, nxt_bar, squeeze)
+        x, bar, i = nxt_x, nxt_bar, i + 1
     handover(lvl, x1)
 
 
@@ -270,10 +295,7 @@ def section_drop(lvl, t, mem, x0, x1, b0, b1):
     frames at 60Hz), with a 240Hz pinch dropped on every bar line."""
     start, end = enter(lvl, x0, "wave"), round(x1) - TAIL
     per_beat = t.blocks_per_beat(t.bar(b0))
-    path = P.zigzag(start, per_beat * 1.0, 1.2, 6.0)
-    for x in range(start, end):
-        P.corridor(lvl, x, x, path, 0.67, wall=2, spikes=False, color=CH_WALL)
-    pinch_bars(lvl, t, path, b0, b1, "wave", step=0.75)
+    wave_run(lvl, t, start, end, b0, b1, TIGHT_PASSAGE, phrase=2, rotate=2)
     handover(lvl, x1)
 
 
@@ -324,10 +346,8 @@ def section_flow(lvl, t, mem, x0, x1, b0, b1):
     clear = 8                                        # blank columns around each mode swap
 
     # 1: wave at 0.8 blocks, with a 240Hz pinch every half bar
-    path = P.zigzag(start, per_beat * 1.0, 1.2, 6.2)
-    for x in range(edges[0], edges[1] - clear):
-        P.corridor(lvl, x, x, path, 0.67, wall=2, spikes=False, color=CH_WALL)
-    pinch_bars(lvl, t, path, b0, b0 + (b1 - b0) / 4, "wave", step=0.5)
+    wave_run(lvl, t, edges[0], edges[1] - clear, b0, b0 + (b1 - b0) / 4, TIGHT_PASSAGE,
+             phrase=2, rotate=4)
 
     # 2: ship, second frame perfect - a slam that opens one block wide
     lvl.portal("ship", edges[1] - clear + 2, 1)
@@ -350,10 +370,8 @@ def section_flow(lvl, t, mem, x0, x1, b0, b1):
 
     # 4: wave again, fastest zigzag of the level, pinched every half bar
     lvl.portal("wave", edges[3] - clear + 2, 1)
-    path2 = P.zigzag(edges[3], per_beat * 0.5, 1.2, 4.2)
-    for x in range(edges[3], end):
-        P.corridor(lvl, x, x, path2, 0.67, wall=2, spikes=False, color=CH_WALL)
-    pinch_bars(lvl, t, path2, b0 + 3 * (b1 - b0) / 4, b1, "wave", step=0.5)
+    wave_run(lvl, t, edges[3], end, b0 + 3 * (b1 - b0) / 4, b1, TIGHT_PASSAGE, phrase=2,
+             rotate=1)
     handover(lvl, x1)
 
 
@@ -369,10 +387,8 @@ def section_late(lvl, t, mem, x0, x1, b0, b1):
         span = min(int(per_beat * 4 * phrase), end - x)
         stop = x + span - clear
         if mode == "wave":
-            path = P.zigzag(x, per_beat * 2, 1.2, 6.0)
-            for c in range(x, stop):
-                P.corridor(lvl, c, c, path, 1.3, wall=1, color=CH_WALL)
-            pinch_bars(lvl, t, path, bar, bar + phrase, "wave", step=phrase, guard=10)
+            wave_run(lvl, t, x, stop, bar, bar + phrase, TIGHT_PASSAGE * 1.15, phrase=4,
+                     rotate=int(bar) % 6)
             nxt = "ship"
         else:
             P.tunnel(lvl, x, stop, 0.8, 5.2, wall=1, color=CH_WALL)
@@ -394,3 +410,87 @@ def section_fade(lvl, t, mem, x0, x1, b0, b1):
     enter(lvl, x0, "cube")
     lvl.blocks(round(x0), 0, int(x1 - x0) + 12, color=CH_WALL)
     lvl.text(round(x1) - 6, 5, "nihil", scale=0.8, color=CH_HINT)
+
+
+# ---------------------------------------------------------------- phrase patterns
+# A section built from one shape for 20 bars reads as one long identical corridor, which is
+# what made v1 feel repetitive. Each 4-bar phrase picks the next pattern instead, so the
+# shape, the input rhythm and the part of the screen being used all keep moving.
+
+def pat_zigzag(lvl, t, x0, x1, b0, b1, passage, mode="wave"):
+    """The staple: triangle wave, one cycle per two beats."""
+    path, _, slope = P.wave_zigzag(x0, t.blocks_per_beat(t.bar(b0)) * 2, centre=3.6,
+                                   amplitude=5.0, passage=passage)
+    for x in range(x0, x1):
+        P.corridor(lvl, x, x, path, passage + slope, wall=2, spikes=False, color=CH_EDGE,
+                   fill_color=CH_FILL)
+
+
+def pat_stairs(lvl, t, x0, x1, b0, b1, passage, mode="wave", down=False):
+    """Flat treads that step on the beat - the corridor climbs, the inputs are staccato."""
+    step = min(1.2, passage * 0.8)
+    edges = beats(t, b0, b1, 4)
+    def path(x):
+        n = sum(1 for e in edges if e <= x)
+        n = (len(edges) - n) if down else n
+        return 2.2 + step * (n % 5)
+    for x in range(x0, x1):
+        P.corridor(lvl, x, x, path, passage + step, wall=2, spikes=False, color=CH_EDGE,
+                   fill_color=CH_FILL)
+
+
+def pat_straight_pinch(lvl, t, x0, x1, b0, b1, passage, mode="wave"):
+    """Dead straight, but a frame-perfect squeeze lands on every beat."""
+    centre = 3.4
+    P.corridor(lvl, x0, x1, lambda _x: centre, passage * 2.0, wall=2, spikes=False,
+               color=CH_EDGE, fill_color=CH_FILL)
+    for x in beats(t, b0, b1, 4):
+        if x0 + 3 <= x <= x1 - 3:
+            P.pinch(lvl, round(x), centre, mode, t.speed_at(t.bar(b0)), fps=240, frames=1.0,
+                    width=2, color=CH_HAZARD)
+
+
+def pat_teeth(lvl, t, x0, x1, b0, b1, passage, mode="wave"):
+    """Wide corridor, spikes biting in from alternating sides on every 8th."""
+    centre, gap = 3.8, passage * 4.5
+    P.corridor(lvl, x0, x1, lambda _x: centre, gap, wall=2, spikes=False, color=CH_EDGE,
+               fill_color=CH_FILL)
+    for i, x in enumerate(beats(t, b0, b1, 8)):
+        if x0 + 2 <= x <= x1 - 2:
+            row = centre - gap / 2 if i % 2 else centre + gap / 2 - 1
+            lvl.spike(round(x), row, ceiling=bool(i % 2 == 0), color=CH_HAZARD)
+
+
+def pat_orb_bounce(lvl, t, x0, x1, b0, b1, passage, mode="wave"):
+    """Open air and blue orbs on the drums: the gravity flips carry you, not the walls."""
+    P.tunnel(lvl, x0, x1, 1.0, 8.0, wall=2, spikes=False, color=CH_EDGE, fill_color=CH_FILL)
+    lo, hi = t.seconds(t.bar(b0)), t.seconds(t.bar(b1))
+    for i, x in enumerate(drum_columns(t, lo, hi)):
+        if x0 + 2 <= x <= x1 - 2:
+            lvl.orb("blue", round(x, 2), 2.6 if i % 2 else 6.4, color=CH_HAZARD)
+
+
+def pat_funnel(lvl, t, x0, x1, b0, b1, passage, mode="wave"):
+    """Opens wide then closes to the target passage across the phrase - a visible threat."""
+    path, _, slope = P.wave_zigzag(x0, t.blocks_per_beat(t.bar(b0)) * 4, centre=3.6,
+                                   amplitude=3.0, passage=passage)
+    span = max(1, x1 - x0)
+    for x in range(x0, x1):
+        wide = passage * (2.6 - 1.6 * (x - x0) / span)
+        P.corridor(lvl, x, x, path, wide + slope, wall=2, spikes=False, color=CH_EDGE,
+                   fill_color=CH_FILL)
+
+
+WAVE_PATTERNS = [pat_zigzag, pat_straight_pinch, pat_teeth, pat_stairs, pat_orb_bounce,
+                 pat_funnel]
+
+
+def wave_run(lvl, t, x0, x1, b0, b1, passage, *, phrase=4, rotate=0):
+    """Fill a flying section with a different pattern every `phrase` bars."""
+    bar, x, i = b0, x0, rotate
+    while x < x1 - 4 and bar < b1:
+        nxt_bar = min(b1, bar + phrase)
+        nxt_x = min(x1, round(t.col(t.bar(nxt_bar))))
+        if nxt_x - x > 6:
+            WAVE_PATTERNS[i % len(WAVE_PATTERNS)](lvl, t, x, nxt_x, bar, nxt_bar, passage)
+        x, bar, i = nxt_x, nxt_bar, i + 1
