@@ -25,17 +25,19 @@ from pathlib import Path
 
 from gdmaker import Level
 from gdmaker import patterns as P
+from gdmaker import rhythm as R
 from gdmaker.sync import Timeline
 
 DRUMS = Path(__file__).resolve().parent.parent / "data" / "nhelv_drums.json"
+HITS = Path(__file__).resolve().parent.parent / "data" / "nhelv_hits.json"
 
 BPM, OFFSET = 175.186, 0.401
 
 # (start bar, end bar) snapped to bar lines from the section analysis
 SECTIONS = {
     "lead_in":   (0, 4),        # 0:00-0:06  silence
-    "intro":     (4, 19),       # 0:06-0:26  quiet intro
-    "main_wave": (19, 35),      # 0:26-0:48
+    "intro":     (4, 17),       # 0:06-0:24  bass line: spider, then orbs
+    "main_wave": (17, 35),      # 0:24-0:48  wave on the drums
     "main_ship": (35, 52),      # 0:48-1:11
     "main_mini": (52, 68),      # 1:11-1:33
     "mid":       (68, 84),      # 1:33-1:56
@@ -134,25 +136,82 @@ def section_lead_in(lvl, t, mem, x0, x1, b0, b1):
 
 
 def section_intro(lvl, t, mem, x0, x1, b0, b1):
-    """Cube, 2x. On-beat timings that tighten; one invisible spike states the theme."""
-    start = enter(lvl, x0)
-    for i, x in enumerate(beats(t, b0, b1, 2)):
-        if not start <= x <= x1 - TAIL:
-            continue
-        if i % 4 == 3:
-            lvl.spikes(round(x), 2, color=CH_HAZARD)
-        elif i % 4 == 1:
-            lvl.blocks(round(x), 0, 3, color=CH_WALL)
-            lvl.spike(round(x) + 1, 1, color=CH_HAZARD)
+    """0:06-0:24, 2x. Every input is a note of the bass line.
+
+    0:06-0:15  spider: one teleport per bass hit. A spike waits on your current side just
+               past each hit, so the flip has to land on the note.
+    0:15-0:24  cube over a spike pit: yellow/pink orbs placed where the cube actually is on
+               each hit, so the clicks play the bass line and missing one drops you.
+    """
+    low = R.load_hits(HITS, "low")
+    s0, split, s1 = t.seconds(t.bar(b0)), t.seconds(t.bar(11)), t.seconds(t.bar(b1))
+
+    # --- spider on the bass
+    lvl.portal("spider", round(x0) + 2, 1)
+    ceil_row, spider_start = 5, t.col_at_seconds(s0 + 0.9)
+    split_x = t.col_at_seconds(split)
+    P.corridor(lvl, round(x0) + 2, round(split_x) + 2, lambda _x: 2.5, 5.0, wall=1,
+               spikes=False, floor=False, color=CH_EDGE, fill_color=CH_FILL)
+    run = R.spider_run(t, R.pick(low, s0 + 0.9, split - 0.4, min_gap=0.17), s0, split)
+    side = "floor"
+    for x, new_side in run.flips:
+        # a spike on the side you're leaving, just past the note: stay and you die
+        if side == "floor":
+            lvl.spike(round(x + 0.8, 2), 0, color=CH_HAZARD)
         else:
-            lvl.spike(round(x), color=CH_HAZARD)
-    mem.hide(lvl.spike(round(t.col(t.bar(b1 - 2))), color=CH_HAZARD))
+            lvl.spike(round(x + 0.8, 2), ceil_row - 1, ceiling=True, color=CH_HAZARD)
+        side = new_side
+    lvl.text(round(spider_start) - 6, 3, "NIHIL LIGHT", scale=0.7, color=CH_HINT)
+
+    # --- cube + orbs on the bass, over a pit
+    lvl.portal("cube", round(split_x) + 3, 1)
+    jump_t = min(h for h in low if h >= split + 0.5)   # the first jump is a note too
+    jump_x = t.col_at_seconds(jump_t)
+    chain = R.orb_chain(t, low, jump_t, s1 - 0.3, y0=0.0, lo=1.2, hi=7.5,
+                        kinds=["yellow", "yellow", "pink"], min_gap=0.14)
+    lvl.spike(round(jump_x + 1), 0, color=CH_HAZARD)            # forces the first jump
+    ends = [o[0] for o in chain.orbs] + [p[1] for p in chain.platforms]
+    last_x = max(ends) if ends else jump_x + 20
+    P.spike_teeth(lvl, range(round(jump_x + 2), round(last_x) + 4), 0, color=CH_HAZARD)
+    for x, y, kind in chain.orbs:
+        lvl.orb(kind, round(x, 2), round(y, 2), color=CH_HAZARD)
+    for a, b, top in chain.platforms:                            # rests between phrases
+        for c in range(round(a), round(b) + 1):
+            lvl.add(1, c, top - 1, color=CH_EDGE)
+    lvl.blocks(round(last_x) + 5, 0, max(1, round(t.col(t.bar(b1))) - round(last_x) - 5),
+               color=CH_EDGE)                                     # landing
 
 
 def section_main_wave(lvl, t, mem, x0, x1, b0, b1):
-    """Wave, 3x. Six different phrase shapes, 1.0 passage (~2.5 frames at 60Hz)."""
-    start, end = enter(lvl, x0, "wave"), round(x1) - TAIL
-    wave_run(lvl, t, start, end, b0, b1, MAIN_PASSAGE)
+    """0:24-0:48. A wave that turns on the drums, switching which drum drives it.
+
+    0:24-1:00  snares enter: the wave reverses on every snare (mid band).
+    bars 27-31 the hats go constant: mini wave spamming the 16ths.
+    bars 31-35 back to normal size, turning on the kick pattern.
+    The corridor is built around the path, so it is a different shape every bar because
+    the drum pattern is.
+    """
+    mid, high, low = (R.load_hits(HITS, b) for b in ("mid", "high", "low"))
+    lvl.portal("wave", round(x0) + 2, 1)
+    s = lambda bar: t.seconds(t.bar(bar))
+    parts = [  # (from bar, to bar, hits, rows per column)
+        (b0, 27, R.pick(sorted(mid + low), s(b0) + 0.4, s(27), min_gap=0.12), 1.0),
+        (27, 31, R.pick(sorted(high + mid + low), s(27), s(31), min_gap=0.085), 2.0),
+        (31, b1, R.pick(sorted(low + mid), s(31), s(b1) - 0.5, min_gap=0.12), 1.0),
+    ]
+    y = 1.5
+    for i, (a, b, hits, rpc) in enumerate(parts):
+        xa, xb = t.col_at_seconds(s(a)), t.col_at_seconds(s(b))
+        if rpc == 2.0:
+            lvl.portal("mini", round(xa), round(y))
+        elif i and parts[i - 1][3] == 2.0:
+            lvl.portal("normal_size", round(xa), round(y))
+        path = R.wave_path(t, hits, s(a), s(b), y0=y, lo=1.0, hi=7.5, rows_per_col=rpc)
+        passage = MAIN_PASSAGE * (0.8 if rpc == 2.0 else 1.0)
+        for x in range(round(xa) + 1, round(xb)):
+            P.corridor(lvl, x, x, path, passage + rpc, wall=1, spikes=False,
+                       color=CH_EDGE, fill_color=CH_FILL)
+        y = path(xb)
     handover(lvl, x1)
 
 
