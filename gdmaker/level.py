@@ -509,7 +509,9 @@ class Level:
 
         portals = [o for o in self.objects if o.id in O.GAMEMODE_PORTALS.values()]
         for p in portals:
-            near = [h for h in hazards if p.col < h.col < p.col + 2.5]
+            # only hazards roughly in front of the player, not corridor walls above/below
+            near = [h for h in hazards
+                    if p.col < h.col < p.col + 2.5 and abs(h.row - p.row) <= 1.5]
             if near:
                 warnings.append(f"hazard {near[0].col - p.col:.1f} blocks after the "
                                 f"{O.describe(p.id)} at col {p.col:g} (give ~3+ blocks)")
